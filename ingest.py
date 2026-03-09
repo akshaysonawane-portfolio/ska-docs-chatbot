@@ -1,14 +1,31 @@
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 import chromadb
+from chromadb.config import Settings
 from openai import OpenAI
 from uuid import uuid4
+import os
+from dotenv import load_dotenv
+
+# -----------------------------
+# Load API key
+# -----------------------------
+
+load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+
+client = OpenAI(api_key=api_key)
 
 BASE_URL = "https://developer.skao.int/en/latest/"
 
-client = OpenAI()
+# -----------------------------
+# Collect documentation links
+# -----------------------------
 
 def get_links():
+
+    print("Collecting links...")
 
     r = requests.get(BASE_URL)
     soup = BeautifulSoup(r.text, "html.parser")
@@ -16,34 +33,74 @@ def get_links():
     links = []
 
     for link in soup.find_all("a"):
+
         href = link.get("href")
 
-        if href and href.startswith("http") and "developer.skao.int" in href:
-            links.append(href)
+        if not href:
+            continue
 
-    return list(set(links))
+        full_url = urljoin(BASE_URL, href)
 
+        if "developer.skao.int" not in full_url:
+            continue
+
+        if "#" in full_url:
+            continue
+
+        links.append(full_url)
+
+    links = list(set(links))
+
+    print("Total links found:", len(links))
+
+    return links
+
+
+# -----------------------------
+# Extract page text
+# -----------------------------
 
 def extract_text(url):
 
-    r = requests.get(url)
+    try:
 
-    soup = BeautifulSoup(r.text, "html.parser")
+        r = requests.get(url, timeout=10)
 
-    return soup.get_text()
+        soup = BeautifulSoup(r.text, "html.parser")
 
+        text = soup.get_text(separator="\n")
+
+        return text
+
+    except Exception as e:
+
+        print("Failed:", url)
+
+        return ""
+
+
+# -----------------------------
+# Split document into chunks
+# -----------------------------
 
 def chunk_text(text, size=800):
 
     chunks = []
 
     for i in range(0, len(text), size):
-        chunks.append(text[i:i+size])
+
+        chunk = text[i:i+size]
+
+        chunks.append(chunk)
 
     return chunks
 
 
-def create_embeddings(text):
+# -----------------------------
+# Create embeddings
+# -----------------------------
+
+def create_embedding(text):
 
     response = client.embeddings.create(
         model="text-embedding-3-small",
@@ -53,13 +110,24 @@ def create_embeddings(text):
     return response.data[0].embedding
 
 
+# -----------------------------
+# Main ingestion pipeline
+# -----------------------------
+
 def main():
+
+    print("Starting ingestion...")
 
     links = get_links()
 
-    chroma = chromadb.Client()
+    chroma = chromadb.Client(
+        Settings(
+            persist_directory="./chroma_db",
+            is_persistent=True
+        )
+    )
 
-    collection = chroma.create_collection("ska_docs")
+    collection = chroma.get_or_create_collection("ska_docs")
 
     for url in links:
 
@@ -67,17 +135,29 @@ def main():
 
         text = extract_text(url)
 
+        if not text:
+            continue
+
         chunks = chunk_text(text)
 
         for chunk in chunks:
 
-            embedding = create_embeddings(chunk)
+            try:
 
-            collection.add(
-                ids=[str(uuid4())],
-                embeddings=[embedding],
-                documents=[chunk]
-            )
+                embedding = create_embedding(chunk)
+
+                collection.add(
+                    ids=[str(uuid4())],
+                    embeddings=[embedding],
+                    documents=[chunk],
+                    metadatas=[{"source": url}]
+                )
+
+            except Exception:
+
+                print("Embedding failed")
+    print("Total stored docs:", collection.count())
+    print("Ingestion complete")
 
 
 if __name__ == "__main__":
