@@ -37,7 +37,7 @@ def ask(question):
 
     results = collection.query(
         query_embeddings=[embedding],
-        n_results=14
+        n_results=16
     )
 
     docs = results.get("documents", [])
