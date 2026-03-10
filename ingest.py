@@ -7,53 +7,90 @@ from openai import OpenAI
 from uuid import uuid4
 import os
 from dotenv import load_dotenv
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import time
 
 # -----------------------------
 # Load API key
 # -----------------------------
 
 load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
 
-client = OpenAI(api_key=api_key)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 BASE_URL = "https://developer.skao.int/en/latest/"
+MAX_PAGES = 1500
+BATCH_SIZE = 100
 
 # -----------------------------
-# Collect documentation links
+# Text splitter
 # -----------------------------
 
-def get_links():
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,
+    chunk_overlap=200
+)
 
-    print("Collecting links...")
+# -----------------------------
+# Crawl documentation
+# -----------------------------
 
-    r = requests.get(BASE_URL)
-    soup = BeautifulSoup(r.text, "html.parser")
+def crawl_docs():
 
-    links = []
+    print("Starting recursive crawl...")
 
-    for link in soup.find_all("a"):
+    visited = set()
+    queue = [BASE_URL]
+    docs = []
 
-        href = link.get("href")
+    while queue and len(docs) < MAX_PAGES:
 
-        if not href:
+        url = queue.pop(0)
+
+        if url in visited:
             continue
 
-        full_url = urljoin(BASE_URL, href)
+        visited.add(url)
 
-        if "developer.skao.int" not in full_url:
+        print("Scanning:", url)
+
+        try:
+            r = requests.get(url, timeout=10)
+        except:
             continue
 
-        if "#" in full_url:
-            continue
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        links.append(full_url)
+        docs.append(url)
 
-    links = list(set(links))
+        for link in soup.find_all("a"):
 
-    print("Total links found:", len(links))
+            href = link.get("href")
 
-    return links
+            if not href:
+                continue
+
+            full_url = urljoin(url, href)
+
+            if "developer.skao.int" not in full_url:
+                continue
+
+            if "#" in full_url:
+                continue
+
+            if full_url.endswith((".png",".jpg",".svg",".css",".js",".pdf")):
+                continue
+
+            if full_url not in visited and full_url not in queue:
+                queue.append(full_url)
+
+        print("Pages discovered:", len(docs))
+
+        time.sleep(0.1)
+
+    print("Total documentation pages discovered:", len(docs))
+
+    return docs
 
 
 # -----------------------------
@@ -63,62 +100,37 @@ def get_links():
 def extract_text(url):
 
     try:
-
         r = requests.get(url, timeout=10)
-
         soup = BeautifulSoup(r.text, "html.parser")
-
-        text = soup.get_text(separator="\n")
-
-        return text
-
-    except Exception as e:
-
+        return soup.get_text(separator="\n")
+    except:
         print("Failed:", url)
-
         return ""
 
 
 # -----------------------------
-# Split document into chunks
+# Batch embedding
 # -----------------------------
 
-def chunk_text(text, size=800):
-
-    chunks = []
-
-    for i in range(0, len(text), size):
-
-        chunk = text[i:i+size]
-
-        chunks.append(chunk)
-
-    return chunks
-
-
-# -----------------------------
-# Create embeddings
-# -----------------------------
-
-def create_embedding(text):
+def create_embeddings_batch(texts):
 
     response = client.embeddings.create(
         model="text-embedding-3-small",
-        input=text
+        input=texts
     )
 
-    return response.data[0].embedding
+    return [d.embedding for d in response.data]
 
 
 # -----------------------------
-# Main ingestion pipeline
+# Main ingestion
 # -----------------------------
 
 def main():
 
-    print("Starting ingestion...")
+    print("Starting full SKA documentation ingestion...")
 
-    links = get_links()
+    urls = crawl_docs()
 
     chroma = chromadb.Client(
         Settings(
@@ -129,7 +141,10 @@ def main():
 
     collection = chroma.get_or_create_collection("ska_docs")
 
-    for url in links:
+    all_chunks = []
+    all_metadata = []
+
+    for url in urls:
 
         print("Processing:", url)
 
@@ -138,25 +153,38 @@ def main():
         if not text:
             continue
 
-        chunks = chunk_text(text)
+        chunks = splitter.split_text(text)
 
         for chunk in chunks:
 
-            try:
+            if len(chunk.strip()) < 100:
+                continue
 
-                embedding = create_embedding(chunk)
+            all_chunks.append(chunk)
+            all_metadata.append({"source": url})
 
-                collection.add(
-                    ids=[str(uuid4())],
-                    embeddings=[embedding],
-                    documents=[chunk],
-                    metadatas=[{"source": url}]
-                )
+    print("Total chunks:", len(all_chunks))
 
-            except Exception:
+    # -----------------------------
+    # Batch embeddings
+    # -----------------------------
 
-                print("Embedding failed")
-    print("Total stored docs:", collection.count())
+    for i in range(0, len(all_chunks), BATCH_SIZE):
+
+        batch = all_chunks[i:i+BATCH_SIZE]
+        meta = all_metadata[i:i+BATCH_SIZE]
+
+        print("Embedding batch", i, "-", i+len(batch))
+
+        embeddings = create_embeddings_batch(batch)
+
+        collection.add(
+            ids=[str(uuid4()) for _ in batch],
+            embeddings=embeddings,
+            documents=batch,
+            metadatas=meta
+        )
+
     print("Ingestion complete")
 
 

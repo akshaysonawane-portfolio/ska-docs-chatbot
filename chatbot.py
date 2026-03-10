@@ -4,19 +4,15 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# -----------------------------
-# Load API key
-# -----------------------------
-
 load_dotenv()
 
 api_key = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=api_key)
 
-# -----------------------------
-# Connect to ChromaDB
-# -----------------------------
+# -----------------------
+# Connect DB
+# -----------------------
 
 chroma = chromadb.Client(
     Settings(
@@ -28,22 +24,20 @@ chroma = chromadb.Client(
 collection = chroma.get_collection("ska_docs")
 
 
-# -----------------------------
-# Ask Question
-# -----------------------------
+# -----------------------
+# Ask question
+# -----------------------
 
 def ask(question):
 
-    # Create embedding for query
     embedding = client.embeddings.create(
         model="text-embedding-3-small",
         input=question
     ).data[0].embedding
 
-    # Retrieve similar documents
     results = collection.query(
         query_embeddings=[embedding],
-        n_results=12
+        n_results=14
     )
 
     docs = results.get("documents", [])
@@ -54,16 +48,15 @@ def ask(question):
     if not docs or len(docs[0]) == 0:
         return "No relevant documentation found."
 
-    # Combine retrieved chunks
     context = "\n\n".join(docs[0])
 
     prompt = f"""
-You are an assistant that answers questions using SKA developer documentation.
+You are an expert assistant for SKA developer documentation.
 
-Answer using ONLY the documentation context below.
+Answer the question using ONLY the context below.
 
-If the context only partially answers the question,
-provide the closest relevant explanation from the documentation.
+If the context partially answers the question,
+provide the closest relevant explanation.
 
 Do NOT invent information.
 
@@ -76,14 +69,12 @@ Question:
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
+        messages=[{"role": "user", "content": prompt}]
     )
 
     answer = response.choices[0].message.content
 
-    # Collect source links
+    # Add sources
     source_links = []
 
     if sources and len(sources[0]) > 0:
@@ -91,7 +82,9 @@ Question:
             if "source" in m:
                 source_links.append(m["source"])
 
-    if source_links:
-        answer += "\n\nSources:\n" + "\n".join(set(source_links))
+    # if source_links:
+    #     answer += "\n\n📚 Sources:\n"
+    #     for link in set(source_links):
+    #         answer += f"- {link}\n"
 
     return answer

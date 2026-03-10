@@ -1,7 +1,8 @@
-requests
-beautifulsoup4
-chromadb
 openai
-streamlit
-tqdm
+chromadb
+beautifulsoup4
+requests
 python-dotenv
+streamlit
+langchain-text-splitters
+lxml
